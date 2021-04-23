@@ -7,6 +7,8 @@ const path = require("path");
 const fs = Promise.promisifyAll(require("fs"));
 const defaultValue = require("default-value");
 const unhandledError = require("unhandled-error");
+const bhttp = require("bhttp");
+const cookieParser = require("cookie-parser");
 
 const config = require("./config.json");
 const createThumbnailer = require("./lib/thumbnailer");
@@ -16,6 +18,7 @@ const validateDateFolderName = require("./lib/validate/date-folder");
 const validateNumber = require("./lib/validate/number");
 const ValidationError = require("./lib/validate/error");
 const ThumbnailError = require("./lib/thumbnailer/error");
+const { verify } = require("crypto");
 
 let errorHandler = unhandledError((err, context) => {
 	console.log("Unhandled error!", err);
@@ -38,10 +41,45 @@ app.set("views", path.join(__dirname, "views"));
 // NOTE: This means that any proxied IP header is trusted! While the client IP is not currently used anywhere, this means that anyone who can connect to the service directly can spoof their IP.
 app.set("trust proxy", true);
 
+app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/photos", express.static(config.pictureFolder));
 
 let router = expressPromiseRouter();
+
+function verifyMediaWikiAuth(cookies) {
+	return Promise.try(() => {
+		let concatCookies = "";
+		Object.entries(cookies).forEach(([name, val]) => {
+			concatCookies += `${name}=${val};`;
+		});
+		return bhttp.get(`${config.mediawikiUrl}Special:Preferences`, {headers: {Cookie: concatCookies}});
+	}).then(({request, redirectHistory}) => {
+		if (redirectHistory.length == 0 && !request.options.path.includes("Special%3AUserLogin")) {
+			return true;
+		} else {
+			return false;
+		}
+	})
+}
+
+router.get("/mediaWikiAuth", (req, res) => {
+	return Promise.try(() => {
+		let nameCookie = req.cookies[`${config.mediawikiCookie}_UserName`];
+		if (nameCookie != undefined) {
+			console.log("Trying MediaWiki Cookies for", nameCookie);
+			return verifyMediaWikiAuth(req.cookies);
+		} else {
+			return false;
+		}
+	}).then((auth) => {
+		if (auth) {
+			return res.status(200).send("Authenticated");
+		} else {
+			return res.status(401).send("No, or invalid MediaWiki cookies found");
+		}
+	});
+});
 
 router.get("/latest", (req, res) => {
 	return Promise.try(() => {
@@ -130,6 +168,7 @@ router.get("/thumbnails/:date/:filename", (req, res) => {
 app.use(router);
 
 app.use((err, req, res, next) => {
+	console.log('a');
 	if (err instanceof ValidationError) {
 		res.status(404).send("404 not found");
 	} else if (err instanceof ThumbnailError) {
